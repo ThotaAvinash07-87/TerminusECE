@@ -1,0 +1,39 @@
+terminus/
+│
+├── core/                        
+│   ├── ipc_router.py            # Local socket server for cross-terminal communication
+│   ├── ascii_canvas.py          # 2D grid rendering and A* pathfinding for visual wires
+│   └── common_math.py           # Shared utilities used across multiple engines
+│
+├── engines/                     
+│   ├── circuit/                 # (LTspice-like)
+│   │   ├── components.py        # R, L, C, Diode, Source definitions
+│   │   ├── netlist_parser.py    # Translates text commands into circuit nodes
+│   │   └── mna_solver.py        # Matrix setup and numerical integration
+│   │
+│   ├── numerical/               # (MATLAB-like)
+│   │   ├── parser.py            # Abstract Syntax Tree (AST) evaluator for math strings
+│   │   ├── matrix_ops.py        # NumPy integration for heavy linear algebra
+│   │   └── transforms.py        # Dedicated solvers for Fourier, Laplace, and Z-transforms
+│   │
+│   ├── dynamic_systems/         # (Simulink-like)
+│   │   ├── blocks.py            # Definitions for integrators, scopes, and PID controllers
+│   │   ├── scheduler.py         # Directed Acyclic Graph (DAG) for execution order
+│   │   └── ode_solver.py        # Runge-Kutta (RK4) engine for stepping through time
+│   │
+│   ├── digital_logic/           # (Xilinx-like)
+│   │   ├── gates.py             # Combinational and sequential logic definitions
+│   │   ├── hdl_parser.py        # Translating standard logic syntax into graph nodes
+│   │   └── event_sim.py         # Managing clock edges and signal propagation delays
+│   │
+│   └── embedded/                # (Embedded IDE/Emulator)
+│       ├── toolchain.py         # Interfaces with local Embedded C compilers
+│       ├── mcu_core.py          # Register and memory mapping (e.g., TI C2000 architecture)
+│       └── peripherals.py       # Simulating PWM, timers, and motor control outputs
+│
+├── ui/                          
+│   ├── app.py                   # Main Textual App (what we just built)
+│   ├── screens.py               # Different UI layouts for different modes
+│   └── widgets.py               # Custom terminal plots and ASCII block viewers
+│
+└── terminus.py                  # The main entry point
