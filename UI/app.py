@@ -25,8 +25,13 @@ from Engines.Numerical.parser import NumericalWorkspace, NumericalASTParser
 from Engines.Numerical.transforms import TransferFunction, DiscreteTransferFunction
 
 from Engines.Dynamic_System.blocks import (
-    IntegratorBlock, GainBlock, SumBlock, PIDBlock, TransferFunctionBlock,
-    StepSourceBlock, SineSourceBlock, SaturationBlock, ScopeSinkBlock
+    Block, IntegratorBlock, DerivativeBlock, TransferFunctionBlock, StateSpaceBlock,
+    TransportDelayBlock, SaturationBlock, RateLimiterBlock, DeadZoneBlock, BacklashBlock,
+    RelayBlock, CoulombViscousFrictionBlock, QuantizerBlock, GainBlock, SumBlock,
+    ProductBlock, MathFunctionBlock, LookupTable1DBlock, SwitchBlock,
+    ZeroOrderHoldBlock, UnitDelayBlock, PIDBlock, ConstantBlock,
+    StepSourceBlock, RampSourceBlock, SineSourceBlock, PulseGeneratorBlock,
+    BandLimitedWhiteNoiseBlock, ScopeSinkBlock
 )
 from Engines.Dynamic_System.scheduler import SystemDiagram
 from Engines.Dynamic_System.ode_solver import DynamicSystemSimulator
@@ -405,30 +410,111 @@ class TerminusEngineBridge:
 
             if btype in ("integrator", "int", "1/s"):
                 ic = float(tokens[3]) if len(tokens) > 3 else 0.0
-                self.dynamic_diagram.add_block(IntegratorBlock(bname, initial_condition=ic))
+                lower = float(tokens[4]) if len(tokens) > 4 and tokens[4] != "none" else None
+                upper = float(tokens[5]) if len(tokens) > 5 and tokens[5] != "none" else None
+                self.dynamic_diagram.add_block(IntegratorBlock(bname, initial_condition=ic, lower_limit=lower, upper_limit=upper))
+            elif btype in ("derivative", "deriv", "s"):
+                tau = float(tokens[3]) if len(tokens) > 3 else 0.01
+                self.dynamic_diagram.add_block(DerivativeBlock(bname, tau=tau))
             elif btype == "gain":
                 gain = parse_eng_unit(tokens[3]) if len(tokens) > 3 else 1.0
                 self.dynamic_diagram.add_block(GainBlock(bname, gain=gain))
             elif btype == "sum":
                 signs = tokens[3] if len(tokens) > 3 else "+-"
                 self.dynamic_diagram.add_block(SumBlock(bname, signs=signs))
+            elif btype in ("product", "prod", "mult", "div"):
+                ops = tokens[3] if len(tokens) > 3 else "**"
+                self.dynamic_diagram.add_block(ProductBlock(bname, operations=ops))
+            elif btype in ("mathfunc", "math", "func"):
+                func = tokens[3] if len(tokens) > 3 else "sin"
+                self.dynamic_diagram.add_block(MathFunctionBlock(bname, function=func))
+            elif btype in ("saturation", "sat", "clamp"):
+                lower = float(tokens[3]) if len(tokens) > 3 else -1.0
+                upper = float(tokens[4]) if len(tokens) > 4 else 1.0
+                self.dynamic_diagram.add_block(SaturationBlock(bname, lower_limit=lower, upper_limit=upper))
+            elif btype in ("ratelimiter", "ratelimit", "slew"):
+                rising = float(tokens[3]) if len(tokens) > 3 else 100.0
+                falling = float(tokens[4]) if len(tokens) > 4 else -100.0
+                self.dynamic_diagram.add_block(RateLimiterBlock(bname, rising_slew_rate=rising, falling_slew_rate=falling))
+            elif btype in ("deadzone", "deadband"):
+                start_z = float(tokens[3]) if len(tokens) > 3 else -0.5
+                end_z = float(tokens[4]) if len(tokens) > 4 else 0.5
+                self.dynamic_diagram.add_block(DeadZoneBlock(bname, start_zone=start_z, end_zone=end_z))
+            elif btype in ("backlash", "hysteresis"):
+                db = float(tokens[3]) if len(tokens) > 3 else 1.0
+                self.dynamic_diagram.add_block(BacklashBlock(bname, deadband_width=db))
+            elif btype in ("relay", "schmitt", "bangbang"):
+                on_th = float(tokens[3]) if len(tokens) > 3 else 0.5
+                off_th = float(tokens[4]) if len(tokens) > 4 else -0.5
+                y_on = float(tokens[5]) if len(tokens) > 5 else 1.0
+                y_off = float(tokens[6]) if len(tokens) > 6 else 0.0
+                self.dynamic_diagram.add_block(RelayBlock(bname, switch_on_point=on_th, switch_off_point=off_th, output_on=y_on, output_off=y_off))
+            elif btype in ("friction", "fric"):
+                fc = float(tokens[3]) if len(tokens) > 3 else 1.0
+                bv = float(tokens[4]) if len(tokens) > 4 else 0.1
+                fs = float(tokens[5]) if len(tokens) > 5 else 1.5
+                self.dynamic_diagram.add_block(CoulombViscousFrictionBlock(bname, f_coulomb=fc, b_viscous=bv, f_static=fs))
+            elif btype in ("quantizer", "quant", "adc_dac"):
+                q = float(tokens[3]) if len(tokens) > 3 else 0.1
+                self.dynamic_diagram.add_block(QuantizerBlock(bname, quantization_interval=q))
+            elif btype in ("delay", "transportdelay", "timedelay"):
+                dt_delay = float(tokens[3]) if len(tokens) > 3 else 0.1
+                self.dynamic_diagram.add_block(TransportDelayBlock(bname, delay_time=dt_delay))
+            elif btype in ("zoh", "sampleandhold"):
+                ts = float(tokens[3]) if len(tokens) > 3 else 0.01
+                self.dynamic_diagram.add_block(ZeroOrderHoldBlock(bname, sample_time=ts))
+            elif btype in ("unitdelay", "z^-1", "delay1"):
+                ts = float(tokens[3]) if len(tokens) > 3 else 0.01
+                self.dynamic_diagram.add_block(UnitDelayBlock(bname, sample_time=ts))
+            elif btype in ("switch", "mux2to1"):
+                thresh = float(tokens[3]) if len(tokens) > 3 else 0.0
+                self.dynamic_diagram.add_block(SwitchBlock(bname, threshold=thresh))
             elif btype == "pid":
                 kp = float(tokens[3]) if len(tokens) > 3 else 1.0
                 ki = float(tokens[4]) if len(tokens) > 4 else 0.0
                 kd = float(tokens[5]) if len(tokens) > 5 else 0.0
-                self.dynamic_diagram.add_block(PIDBlock(bname, kp=kp, ki=ki, kd=kd))
+                n_filt = float(tokens[6]) if len(tokens) > 6 else 100.0
+                lower = float(tokens[7]) if len(tokens) > 7 and tokens[7] != "none" else None
+                upper = float(tokens[8]) if len(tokens) > 8 and tokens[8] != "none" else None
+                self.dynamic_diagram.add_block(PIDBlock(bname, kp=kp, ki=ki, kd=kd, n_filter=n_filt, lower_limit=lower, upper_limit=upper))
+            elif btype in ("const", "constant"):
+                val = float(tokens[3]) if len(tokens) > 3 else 1.0
+                self.dynamic_diagram.add_block(ConstantBlock(bname, value=val))
             elif btype == "step":
                 step_t = float(tokens[3]) if len(tokens) > 3 else 0.0
                 amp = float(tokens[4]) if len(tokens) > 4 else 1.0
                 self.dynamic_diagram.add_block(StepSourceBlock(bname, step_time=step_t, amplitude=amp))
+            elif btype in ("ramp", "slope"):
+                slope = float(tokens[3]) if len(tokens) > 3 else 1.0
+                start_t = float(tokens[4]) if len(tokens) > 4 else 0.0
+                self.dynamic_diagram.add_block(RampSourceBlock(bname, slope=slope, start_time=start_t))
+            elif btype in ("sine", "sin"):
+                freq = float(tokens[3]) if len(tokens) > 3 else 1.0
+                amp = float(tokens[4]) if len(tokens) > 4 else 1.0
+                self.dynamic_diagram.add_block(SineSourceBlock(bname, freq=freq, amplitude=amp))
+            elif btype in ("pulse", "square"):
+                prd = float(tokens[3]) if len(tokens) > 3 else 1.0
+                duty = float(tokens[4]) if len(tokens) > 4 else 0.5
+                self.dynamic_diagram.add_block(PulseGeneratorBlock(bname, period=prd, duty_cycle=duty))
+            elif btype in ("noise", "whitenoise"):
+                pwr = float(tokens[3]) if len(tokens) > 3 else 0.1
+                ts = float(tokens[4]) if len(tokens) > 4 else 0.01
+                self.dynamic_diagram.add_block(BandLimitedWhiteNoiseBlock(bname, noise_power=pwr, sample_time=ts))
             elif btype == "scope":
                 self.dynamic_diagram.add_block(ScopeSinkBlock(bname))
             elif btype == "tf":
-                # add tf Plant [1] [1, 2, 1]
-                num_str = tokens[3].strip("[]")
-                den_str = tokens[4].strip("[]")
-                num = [float(x) for x in re.split(r'[\s,]+', num_str) if x]
-                den = [float(x) for x in re.split(r'[\s,]+', den_str) if x]
+                # add tf Plant [1] [1, 2, 1] or [1] [0.2 1]
+                brackets = re.findall(r'\[([^\]]+)\]', line)
+                if len(brackets) >= 2:
+                    num_str, den_str = brackets[0], brackets[1]
+                elif len(tokens) >= 5:
+                    num_str = tokens[3].strip("[]")
+                    den_str = tokens[4].strip("[]")
+                else:
+                    raise ValueError("Usage: add tf <name> [num_coeffs] [den_coeffs]")
+
+                num = [float(x) for x in re.split(r'[\s,]+', num_str.strip()) if x]
+                den = [float(x) for x in re.split(r'[\s,]+', den_str.strip()) if x]
                 self.dynamic_diagram.add_block(TransferFunctionBlock(bname, num, den))
             else:
                 raise ValueError(f"Unknown block type '{btype}'")
