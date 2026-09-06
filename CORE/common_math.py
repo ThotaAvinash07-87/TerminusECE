@@ -254,8 +254,27 @@ class Waveform:
         return "\n".join(lines)
 
 
+def sanitize_array(
+    arr: Sequence[Union[float, complex]],
+    fill_val: float = 0.0,
+    clamp_min: float = -1e12,
+    clamp_max: float = 1e12
+) -> np.ndarray:
+    """Replaces NaNs, Infs, and clamps extreme runaway numbers safely."""
+    data = np.asarray(arr)
+    if np.iscomplexobj(data):
+        r = np.nan_to_num(np.real(data), nan=fill_val, posinf=clamp_max, neginf=clamp_min)
+        i = np.nan_to_num(np.imag(data), nan=fill_val, posinf=clamp_max, neginf=clamp_min)
+        r = np.clip(r, clamp_min, clamp_max)
+        i = np.clip(i, clamp_min, clamp_max)
+        return r + 1j * i
+    else:
+        clean = np.nan_to_num(data.astype(float), nan=fill_val, posinf=clamp_max, neginf=clamp_min)
+        return np.clip(clean, clamp_min, clamp_max)
+
+
 class SignalMetrics:
-    """Helper methods for electrical and control signal measurements."""
+    """Helper methods for comprehensive electrical and control signal measurements."""
     
     @staticmethod
     def measure_rise_time(
@@ -264,11 +283,13 @@ class SignalMetrics:
         high_pct: float = 0.9
     ) -> Optional[float]:
         """Calculates 10%-90% rise time."""
-        y = np.real(waveform.y)
-        x = waveform.x
+        y = sanitize_array(np.real(waveform.y))
+        x = sanitize_array(waveform.x)
         if len(y) < 2:
             return None
         y_min, y_max = np.min(y), np.max(y)
+        if y_max <= y_min:
+            return None
         v_low = y_min + low_pct * (y_max - y_min)
         v_high = y_min + high_pct * (y_max - y_min)
         
@@ -287,15 +308,167 @@ class SignalMetrics:
         drop_db: float = -3.0
     ) -> Optional[float]:
         """Finds -3dB cutoff frequency in frequency response."""
-        if len(freqs) == 0 or len(mag_db) == 0:
+        f_clean = sanitize_array(freqs)
+        m_clean = sanitize_array(mag_db)
+        if len(f_clean) == 0 or len(m_clean) == 0:
             return None
-        passband_gain = mag_db[0]
+        passband_gain = m_clean[0]
         target_gain = passband_gain + drop_db
-        # Find first frequency where gain drops below target
-        idx = np.where(mag_db <= target_gain)[0]
+        idx = np.where(m_clean <= target_gain)[0]
         if len(idx) > 0:
-            return float(freqs[idx[0]])
+            return float(f_clean[idx[0]])
         return None
+
+    @staticmethod
+    def measure_bode_metrics(
+        freqs: Sequence[float],
+        mag_db: Sequence[float],
+        phase_deg: Sequence[float]
+    ) -> Dict[str, Any]:
+        """Calculates key frequency-domain engineering metrics:
+        - Bandwidth (-3dB Cutoff)
+        - Resonance Peak (Mp), Resonance Frequency (fr), Quality Factor (Q)
+        - Gain Margin (GM) and Phase Margin (PM)
+        - Gain Crossover (fgc) and Phase Crossover (fpc)
+        - High-Frequency Roll-off slope (dB/decade)
+        """
+        f = sanitize_array(freqs)
+        m = sanitize_array(mag_db)
+        p = sanitize_array(phase_deg)
+
+        if len(f) < 2:
+            return {}
+
+        results: Dict[str, Any] = {}
+
+        # 1. Bandwidth / -3dB Cutoff
+        fc = SignalMetrics.measure_cutoff_frequency(f, m, drop_db=-3.0)
+        if fc:
+            results["cutoff_fc_hz"] = fc
+
+        # 2. Resonance Peaking / Q factor
+        passband_gain = m[0]
+        max_idx = int(np.argmax(m))
+        peak_gain = float(m[max_idx])
+        if peak_gain > passband_gain + 0.5:  # Noticeable resonant peak
+            peak_freq = float(f[max_idx])
+            peaking_db = peak_gain - passband_gain
+            results["resonance_freq_hz"] = peak_freq
+            results["resonance_peak_db"] = peaking_db
+            # Q approximation: 10^(peaking_db / 20) / sqrt(1 - (1/(2Q))^2) or Q ~= 10^(peaking_db/20)
+            q_approx = 10.0 ** (peaking_db / 20.0)
+            results["q_factor"] = q_approx
+
+        # 3. Gain Crossover Frequency (where Mag = 0 dB) and Phase Margin
+        # Find zero crossing of magnitude
+        sign_changes_mag = np.where(np.diff(np.sign(m)))[0]
+        if len(sign_changes_mag) > 0:
+            idx_gc = sign_changes_mag[0]
+            fgc = float(f[idx_gc])
+            pm = float(180.0 + p[idx_gc])
+            # Normalize PM to [-180, 180]
+            pm_norm = ((pm + 180.0) % 360.0) - 180.0
+            results["gain_crossover_hz"] = fgc
+            results["phase_margin_deg"] = pm_norm
+
+        # 4. Phase Crossover Frequency (where Phase = -180 deg) and Gain Margin
+        p_shifted = p + 180.0
+        sign_changes_ph = np.where(np.diff(np.sign(p_shifted)))[0]
+        if len(sign_changes_ph) > 0:
+            idx_pc = sign_changes_ph[0]
+            fpc = float(f[idx_pc])
+            gm = float(-m[idx_pc])
+            results["phase_crossover_hz"] = fpc
+            results["gain_margin_db"] = gm
+
+        # 5. Roll-off slope at high frequency (dB/dec)
+        if len(f) >= 5 and f[-1] > f[-5] > 0:
+            decades = math.log10(f[-1] / f[-5])
+            if decades > 0.1:
+                slope = (m[-1] - m[-5]) / decades
+                results["rolloff_db_per_decade"] = round(float(slope), 1)
+
+        return results
+
+    @staticmethod
+    def measure_transient_metrics(
+        time_arr: Sequence[float],
+        y_arr: Sequence[float],
+        step_val: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Calculates time-domain step/transient response metrics and detects sudden spikes/glitches:
+        - Peak value, Peak time (tp), Percentage Overshoot (%OS)
+        - 10%-90% Rise time (tr)
+        - 2% Settling time (ts)
+        - Steady-state value (yss) & error (ess)
+        - Sudden glitches/spikes with timestamps
+        """
+        t = sanitize_array(time_arr)
+        y = sanitize_array(y_arr)
+
+        if len(t) < 3:
+            return {}
+
+        results: Dict[str, Any] = {}
+
+        # Steady-state estimate: mean of final 10% of samples
+        n_tail = max(1, int(len(y) * 0.1))
+        y_ss = float(np.mean(y[-n_tail:]))
+        results["steady_state_val"] = y_ss
+
+        if step_val is not None:
+            results["steady_state_error"] = abs(step_val - y_ss)
+
+        # Peak overshoot
+        y_init = y[0]
+        delta_ss = y_ss - y_init
+        max_idx = int(np.argmax(y)) if delta_ss >= 0 else int(np.argmin(y))
+        y_peak = float(y[max_idx])
+        t_peak = float(t[max_idx])
+
+        results["peak_value"] = y_peak
+        results["peak_time_s"] = t_peak
+
+        if abs(delta_ss) > 1e-12:
+            overshoot = ((y_peak - y_ss) / abs(delta_ss)) * 100.0
+            results["overshoot_pct"] = max(0.0, float(overshoot))
+
+        # Rise time (10% to 90%)
+        v_low = y_init + 0.1 * delta_ss
+        v_high = y_init + 0.9 * delta_ss
+        idx_low = np.where(y >= v_low if delta_ss >= 0 else y <= v_low)[0]
+        idx_high = np.where(y >= v_high if delta_ss >= 0 else y <= v_high)[0]
+        if len(idx_low) > 0 and len(idx_high) > 0:
+            results["rise_time_s"] = float(abs(t[idx_high[0]] - t[idx_low[0]]))
+
+        # Settling time (2% band around y_ss)
+        band = 0.02 * abs(delta_ss) if abs(delta_ss) > 1e-12 else 0.02 * abs(y_ss) + 1e-9
+        outside_band = np.where(np.abs(y - y_ss) > band)[0]
+        if len(outside_band) > 0 and outside_band[-1] < len(t) - 1:
+            results["settling_time_s"] = float(t[outside_band[-1] + 1])
+        elif len(outside_band) == 0:
+            results["settling_time_s"] = float(t[0])
+
+        # Glitch / Sudden Spikes detection
+        dt = np.diff(t)
+        dt[dt <= 0] = 1e-12
+        dy_dt = np.diff(y) / dt
+        std_deriv = float(np.std(dy_dt))
+        mean_deriv = float(np.mean(dy_dt))
+
+        # Identify spikes where |dy/dt| exceeds 4 standard deviations
+        spike_indices = np.where(np.abs(dy_dt - mean_deriv) > max(1e-6, 4.0 * std_deriv))[0]
+        glitches: List[Dict[str, float]] = []
+        for s_idx in spike_indices[:5]:  # report top 5 spikes
+            glitches.append({
+                "time_s": float(t[s_idx]),
+                "voltage": float(y[s_idx]),
+                "slew_rate": float(dy_dt[s_idx]),
+            })
+        if glitches:
+            results["detected_glitches"] = glitches
+
+        return results
 
 
 def split_smart_statements(text: str, delimiter: str = ";") -> List[str]:

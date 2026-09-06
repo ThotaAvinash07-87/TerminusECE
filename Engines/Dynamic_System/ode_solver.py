@@ -60,7 +60,9 @@ class DynamicSystemSimulator:
             k4 = self.scheduler.compute_all_derivatives(t + step_size)
 
             # Update state: x = x0 + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
-            x_next = x0 + (step_size / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+            dx = (step_size / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+            dx = np.nan_to_num(dx, nan=0.0, posinf=1e6, neginf=-1e6)
+            x_next = np.clip(x0 + dx, -1e9, 1e9)
             self.scheduler.unpack_states(x_next)
 
         # Collect Scope waveforms

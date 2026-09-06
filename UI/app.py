@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Header, Footer, Input, RichLog, Static
 
 from CORE.common_math import parse_eng_unit, format_eng_unit, Waveform, SignalMetrics, split_smart_statements
-from CORE.ascii_canvas import AsciiCanvas, AsciiPlotter, AsciiBodePlotter
+from CORE.ascii_canvas import AsciiCanvas, AsciiPlotter, AsciiBodePlotter, SchematicVisualizer
 from CORE.ipc_router import IPCRouter, IPCClient
 
 from Engines.Circuit.components import (
@@ -277,11 +277,17 @@ class TerminusEngineBridge:
         if not parts:
             raise ValueError("No simulation specified. Example: 'run .ac dec 10 1Hz 100kHz'")
 
+        # Generate ASCII schematic topology visualization of the circuit
+        topo_diagram = SchematicVisualizer.render_circuit_topology(
+            self.circuit_netlist.components,
+            self.circuit_netlist.pin_map
+        )
+
         sim_cmd = parts[0].lower()
         if sim_cmd == ".op":
             res = self.circuit_solver.solve_op()
             self.last_circuit_sim = res
-            return res.summary()
+            return f"{topo_diagram}\n\n{res.summary()}"
 
         elif sim_cmd == ".dc":
             if len(parts) < 5:
@@ -297,7 +303,7 @@ class TerminusEngineBridge:
             plot_str = ""
             if out_traces:
                 plot_str = AsciiPlotter.plot(out_traces[0].x, out_traces[0].y, title=f"DC Sweep: {out_traces[0].name}", x_label=f"{src} (V)")
-            return f"{res.summary()}\n\n{plot_str}"
+            return f"{topo_diagram}\n\n{res.summary()}\n\n{plot_str}"
 
         elif sim_cmd == ".ac":
             # .ac dec 10 1Hz 100kHz
@@ -329,11 +335,8 @@ class TerminusEngineBridge:
                     out_wf.phase_deg,
                     title=f"Bode Plot: {out_wf.name}"
                 )
-                fc = SignalMetrics.measure_cutoff_frequency(out_wf.x, out_wf.magnitude_db)
-                if fc:
-                    bode_str += f"\n\n[bold yellow]Estimated -3dB Cutoff Frequency (fc):[/bold yellow] {format_eng_unit(fc, 'Hz')}"
 
-            return f"{res.summary()}\n\n{bode_str}"
+            return f"{topo_diagram}\n\n{res.summary()}\n\n{bode_str}"
 
         elif sim_cmd == ".tran":
             # .tran 1u 10m [0]
@@ -353,9 +356,9 @@ class TerminusEngineBridge:
 
             plot_str = ""
             if out_wf:
-                plot_str = AsciiPlotter.plot(out_wf.x, out_wf.y, title=f"Transient: {out_wf.name}", x_label="Time (s)", y_label="Voltage (V)")
+                plot_str = AsciiPlotter.plot(out_wf.x, out_wf.y, title=f"Transient Response: {out_wf.name}", x_label="Time (s)", y_label="Voltage (V)")
 
-            return f"{res.summary()}\n\n{plot_str}"
+            return f"{topo_diagram}\n\n{res.summary()}\n\n{plot_str}"
 
         raise ValueError(f"Unknown simulation command '{sim_cmd}'")
 
@@ -444,12 +447,17 @@ class TerminusEngineBridge:
             res = self.dynamic_simulator.simulate(t_stop, dt=dt)
             self.last_dynamic_sim = res
 
+            block_diagram = SchematicVisualizer.render_dynamic_block_diagram(
+                self.dynamic_diagram.blocks,
+                self.dynamic_diagram.connections
+            )
+
             plots = []
             for sname, wf in res.items():
                 p = AsciiPlotter.plot(wf.x, wf.y, title=f"Scope Output: {sname}", x_label="Time (s)")
                 plots.append(p)
 
-            return f"Simulation complete ({t_stop}s).\n\n" + "\n\n".join(plots)
+            return f"{block_diagram}\n\nSimulation complete ({t_stop}s).\n\n" + "\n\n".join(plots)
 
         raise ValueError(f"Unknown dynamic system command '{line}'")
 

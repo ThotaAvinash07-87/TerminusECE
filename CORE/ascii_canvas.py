@@ -1,10 +1,12 @@
-"""2D ASCII/Unicode Canvas rendering, A* wire routing, and terminal waveform/Bode plotting."""
+"""2D ASCII/Unicode Canvas rendering, A* wire routing, continuous high-res Braille plotting, and Bode/Schematic visualizers."""
 
 from __future__ import annotations
 import math
 import heapq
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import numpy as np
+
+from .common_math import format_eng_unit, sanitize_array, SignalMetrics
 
 BOX_CHARS = {
     "h": "─",
@@ -27,6 +29,15 @@ BOX_CHARS = {
     "block": "█",
     "sub_block": "▀",
 }
+
+# Braille sub-pixel offsets (2 columns x 4 rows per character cell)
+# Standard Unicode Braille pattern offset table
+BRAILLE_DOTS = [
+    [0x01, 0x08],  # Row 0 (top): left, right
+    [0x02, 0x10],  # Row 1: left, right
+    [0x04, 0x20],  # Row 2: left, right
+    [0x40, 0x80],  # Row 3 (bottom): left, right
+]
 
 
 class RoutePath:
@@ -120,7 +131,6 @@ class AsciiCanvas:
         start_x, start_y = start
         end_x, end_y = end
 
-        # Quick Manhattan A* pathfinding
         def heuristic(a: Tuple[int, int], b: Tuple[int, int]) -> int:
             return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
@@ -137,16 +147,13 @@ class AsciiCanvas:
                 break
 
             cx, cy = current
-            # Orthogonal 4-connectivity
             neighbors = [(cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)]
             for nx, ny in neighbors:
                 if not (0 <= nx < self.width and 0 <= ny < self.height):
                     continue
-                # Obstacle penalty (unless start or end)
                 if (nx, ny) in self.obstacles and (nx, ny) != end and (nx, ny) != start:
                     continue
 
-                # Turn penalty to prefer straight wires
                 prev = came_from[current]
                 turn_penalty = 0
                 if prev is not None:
@@ -163,7 +170,6 @@ class AsciiCanvas:
                     heapq.heappush(open_set, (priority, new_cost, neighbor))
                     came_from[neighbor] = current
 
-        # Reconstruct path
         path: List[Tuple[int, int]] = []
         if found:
             curr: Optional[Tuple[int, int]] = end
@@ -172,12 +178,10 @@ class AsciiCanvas:
                 curr = came_from.get(curr)
             path.reverse()
         else:
-            # Fallback direct L-bend
             path = []
             mid_x = (start_x + end_x) // 2
             step_x = 1 if end_x >= start_x else -1
             step_y = 1 if end_y >= start_y else -1
-            
             for ix in range(start_x, mid_x + step_x, step_x):
                 path.append((ix, start_y))
             for iy in range(start_y, end_y + step_y, step_y):
@@ -185,21 +189,16 @@ class AsciiCanvas:
             for ix in range(mid_x, end_x + step_x, step_x):
                 path.append((ix, end_y))
 
-        # Render wire characters onto grid
         for i in range(len(path)):
             px, py = path[i]
             prev_p = path[i - 1] if i > 0 else None
             next_p = path[i + 1] if i < len(path) - 1 else None
 
-            # Determine wire character
             if prev_p is None and next_p is None:
                 char = BOX_CHARS["dot"]
-            elif prev_p is None: # Start
-                if next_p[0] != px:
-                    char = BOX_CHARS["h"]
-                else:
-                    char = BOX_CHARS["v"]
-            elif next_p is None: # End
+            elif prev_p is None:
+                char = BOX_CHARS["h"] if next_p[0] != px else BOX_CHARS["v"]
+            elif next_p is None:
                 if arrow_end:
                     if prev_p[0] < px:
                         char = BOX_CHARS["arrow_r"]
@@ -210,19 +209,15 @@ class AsciiCanvas:
                     else:
                         char = BOX_CHARS["arrow_u"]
                 else:
-                    if prev_p[0] != px:
-                        char = BOX_CHARS["h"]
-                    else:
-                        char = BOX_CHARS["v"]
-            else: # Intermediate corner / line
+                    char = BOX_CHARS["h"] if prev_p[0] != px else BOX_CHARS["v"]
+            else:
                 dx1, dy1 = prev_p[0] - px, prev_p[1] - py
                 dx2, dy2 = next_p[0] - px, next_p[1] - py
-
-                if dx1 != 0 and dx2 != 0: # Horizontal straight
+                if dx1 != 0 and dx2 != 0:
                     char = BOX_CHARS["h"]
-                elif dy1 != 0 and dy2 != 0: # Vertical straight
+                elif dy1 != 0 and dy2 != 0:
                     char = BOX_CHARS["v"]
-                else: # Corner
+                else:
                     dirs = {(dx1, dy1), (dx2, dy2)}
                     if {(0, -1), (1, 0)} == dirs:
                         char = BOX_CHARS["bl"]
@@ -235,7 +230,6 @@ class AsciiCanvas:
                     else:
                         char = BOX_CHARS["cross"]
 
-            # Check if crossing existing wire
             current_ch = self.get_char(px, py)
             if current_ch in (BOX_CHARS["h"], BOX_CHARS["v"], BOX_CHARS["cross"]) and current_ch != char:
                 char = BOX_CHARS["cross"]
@@ -245,31 +239,27 @@ class AsciiCanvas:
         return path
 
     def render(self) -> str:
-        """Returns the entire canvas rendered as a multi-line string."""
         return "\n".join("".join(row) for row in self.grid)
 
 
 class AsciiPlotter:
-    """High-contrast ASCII / Unicode curve and multi-series plotter."""
-    
-    BLOCKS = [" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
-    BRAILLE_DOTS = ["·", "•", "■", "♦", "*", "o", "+", "x"]
+    """High-resolution continuous Braille curve plotter with sub-pixel interpolation and feature annotation."""
 
     @classmethod
     def plot(
         cls,
         x: Sequence[float],
         y: Sequence[float],
-        width: int = 70,
-        height: int = 15,
+        width: int = 72,
+        height: int = 14,
         title: str = "",
         x_label: str = "Time (s)",
-        y_label: str = "Voltage (V)",
-        marker: str = "•"
+        y_label: str = "Signal",
+        annotate: bool = True
     ) -> str:
-        """Generates a formatted 2D ASCII waveform plot."""
-        x_arr = np.asarray(x, dtype=float)
-        y_arr = np.asarray(y, dtype=float)
+        """Generates a high-contrast continuous Braille wave plot with 8x sub-pixel resolution."""
+        x_arr = sanitize_array(x)
+        y_arr = sanitize_array(y)
 
         if len(x_arr) == 0 or len(y_arr) == 0:
             return "[Empty Plot Data]"
@@ -283,69 +273,148 @@ class AsciiPlotter:
             y_max += 1.0
             y_min -= 1.0
 
-        # Create character matrix
-        plot_w = max(20, width - 15)
-        plot_h = max(6, height - 4)
+        # Add small vertical margin
+        y_margin = 0.05 * (y_max - y_min)
+        plot_y_min = y_min - y_margin
+        plot_y_max = y_max + y_margin
 
-        grid = [[" " for _ in range(plot_w)] for _ in range(plot_h)]
+        # Grid dimensions in character cells
+        char_w = max(20, width - 14)
+        char_h = max(6, height - 3)
 
-        # Interpolate points onto screen
-        interp_x = np.linspace(x_min, x_max, plot_w * 3)
+        # Sub-pixel dimensions (Braille is 2 horizontal dots x 4 vertical dots per cell)
+        sub_w = char_w * 2
+        sub_h = char_h * 4
+
+        # Initialize Braille bitmasks: grid of char_h x char_w (each cell contains 8-bit mask)
+        braille_grid = np.zeros((char_h, char_w), dtype=int)
+
+        # Resample and draw continuous connected line segments
+        interp_x = np.linspace(x_min, x_max, sub_w * 4)
         interp_y = np.interp(interp_x, x_arr, y_arr)
 
-        for px_val, py_val in zip(interp_x, interp_y):
-            col = int((px_val - x_min) / (x_max - x_min) * (plot_w - 1))
-            row = int((py_val - y_min) / (y_max - y_min) * (plot_h - 1))
-            row = plot_h - 1 - row  # invert y (0 at top)
-            if 0 <= col < plot_w and 0 <= row < plot_h:
-                grid[row][col] = marker
+        def set_subpixel(sx: int, sy: int) -> None:
+            if 0 <= sx < sub_w and 0 <= sy < sub_h:
+                cell_x = sx // 2
+                cell_y = sy // 4
+                dot_x = sx % 2
+                dot_y = sy % 4
+                braille_grid[cell_y, cell_x] |= BRAILLE_DOTS[dot_y][dot_x]
 
-        # Build final display string with Y-axis numbers
-        lines = []
+        def draw_line(x0: int, y0: int, x1: int, y1: int) -> None:
+            """Bresenham line rasterization on sub-pixel grid for gapless continuous curves."""
+            dx = abs(x1 - x0)
+            dy = abs(y1 - y0)
+            sx = 1 if x0 < x1 else -1
+            sy = 1 if y0 < y1 else -1
+            err = dx - dy
+
+            cx, cy = x0, y0
+            while True:
+                set_subpixel(cx, cy)
+                if cx == x1 and cy == y1:
+                    break
+                e2 = 2 * err
+                if e2 > -dy:
+                    err -= dy
+                    cx += sx
+                if e2 < dx:
+                    err += dx
+                    cy += sy
+
+        prev_sub_x: Optional[int] = None
+        prev_sub_y: Optional[int] = None
+
+        for px_val, py_val in zip(interp_x, interp_y):
+            sub_x = int((px_val - x_min) / (x_max - x_min) * (sub_w - 1))
+            # Invert Y so max is top
+            sub_y = int((plot_y_max - py_val) / (plot_y_max - plot_y_min) * (sub_h - 1))
+            sub_y = max(0, min(sub_h - 1, sub_y))
+
+            if prev_sub_x is not None and prev_sub_y is not None:
+                draw_line(prev_sub_x, prev_sub_y, sub_x, sub_y)
+            else:
+                set_subpixel(sub_x, sub_y)
+
+            prev_sub_x = sub_x
+            prev_sub_y = sub_y
+
+        # Build output strings
+        lines: List[str] = []
         if title:
             lines.append(f"  [bold cyan]{title}[/bold cyan]".center(width))
 
-        for r in range(plot_h):
-            y_val = y_max - (r / (plot_h - 1)) * (y_max - y_min)
-            row_str = "".join(grid[r])
+        for r in range(char_h):
+            y_val = plot_y_max - (r / (char_h - 1)) * (plot_y_max - plot_y_min)
+            row_chars = []
+            for c in range(char_w):
+                mask = braille_grid[r, c]
+                if mask == 0:
+                    row_chars.append(" ")
+                else:
+                    # Unicode Braille base is 0x2800
+                    row_chars.append(chr(0x2800 + mask))
+
+            row_str = "".join(row_chars)
             if r == 0:
                 y_label_str = f"{y_val:8.2e} ┌"
-            elif r == plot_h - 1:
+            elif r == char_h - 1:
                 y_label_str = f"{y_val:8.2e} └"
-            elif r == plot_h // 2:
+            elif r == char_h // 2:
                 y_label_str = f"{y_val:8.2e} ┤"
             else:
                 y_label_str = f"{y_val:8.2e} │"
             lines.append(f"{y_label_str}{row_str}")
 
         # X-axis line and ticks
-        x_axis_line = " " * 10 + "└" + "─" * (plot_w - 1)
+        x_axis_line = " " * 10 + "└" + "─" * (char_w - 1)
         lines.append(x_axis_line)
-        x_ticks = f"{' ' * 10}{x_min:8.2e}{' ' * (plot_w - 20)}{x_max:8.2e}"
+        x_ticks = f"{' ' * 10}{x_min:8.2e}{' ' * max(2, char_w - 20)}{x_max:8.2e}"
         lines.append(x_ticks)
         if x_label:
-            lines.append(f"{' ' * (10 + plot_w // 2 - len(x_label) // 2)}{x_label}")
+            lines.append(f"{' ' * (10 + char_w // 2 - len(x_label) // 2)}{x_label}")
+
+        # Feature annotations
+        if annotate:
+            metrics = SignalMetrics.measure_transient_metrics(x_arr, y_arr)
+            anno_lines = []
+            if "peak_value" in metrics:
+                anno_lines.append(f"• Peak: {metrics['peak_value']:.4g} at t = {metrics.get('peak_time_s', 0):.4e}s")
+            if "overshoot_pct" in metrics and metrics["overshoot_pct"] > 0.1:
+                anno_lines.append(f"• Overshoot (%OS): {metrics['overshoot_pct']:.2f}%")
+            if "rise_time_s" in metrics:
+                anno_lines.append(f"• Rise Time (10%-90% tr): {metrics['rise_time_s']:.4e}s")
+            if "settling_time_s" in metrics:
+                anno_lines.append(f"• Settling Time (2% ts): {metrics['settling_time_s']:.4e}s")
+            if "detected_glitches" in metrics:
+                g_count = len(metrics["detected_glitches"])
+                first_g = metrics["detected_glitches"][0]
+                anno_lines.append(f"• [bold yellow]Notice:[/bold yellow] {g_count} sudden slope/glitch transitions detected (first at t = {first_g['time_s']:.4e}s, slew={first_g['slew_rate']:.2e})")
+
+            if anno_lines:
+                lines.append("\n  [bold green]── Analysis & Key Metrics ──[/bold green]")
+                for al in anno_lines:
+                    lines.append(f"  {al}")
 
         return "\n".join(lines)
 
 
 class AsciiBodePlotter:
-    """Renders Frequency Response (Magnitude in dB and Phase in degrees) in ASCII."""
-    
+    """Renders continuous Frequency Response (Magnitude dB and Phase deg) with full engineering stability analysis."""
+
     @classmethod
     def plot_bode(
         cls,
         frequencies: Sequence[float],
         magnitude_db: Sequence[float],
         phase_deg: Sequence[float],
-        width: int = 72,
+        width: int = 74,
         height_each: int = 10,
         title: str = "Bode Plot"
     ) -> str:
-        """Generates combined magnitude and phase frequency response plots."""
-        freq_arr = np.asarray(frequencies, dtype=float)
-        mag_arr = np.asarray(magnitude_db, dtype=float)
-        ph_arr = np.asarray(phase_deg, dtype=float)
+        freq_arr = sanitize_array(frequencies)
+        mag_arr = sanitize_array(magnitude_db)
+        ph_arr = sanitize_array(phase_deg)
 
         if len(freq_arr) == 0:
             return "[Empty Frequency Data]"
@@ -357,10 +426,10 @@ class AsciiBodePlotter:
             mag_arr,
             width=width,
             height=height_each,
-            title=f"{title} - Magnitude",
+            title=f"{title} - Magnitude Response",
             x_label="log10(Frequency [Hz])",
             y_label="Gain (dB)",
-            marker="━"
+            annotate=False
         )
 
         phase_plot = AsciiPlotter.plot(
@@ -368,10 +437,97 @@ class AsciiBodePlotter:
             ph_arr,
             width=width,
             height=height_each,
-            title=f"{title} - Phase",
+            title=f"{title} - Phase Response",
             x_label="log10(Frequency [Hz])",
             y_label="Phase (°)",
-            marker="╍"
+            annotate=False
         )
 
-        return f"{mag_plot}\n\n{phase_plot}"
+        # Compute comprehensive frequency response engineering metrics
+        metrics = SignalMetrics.measure_bode_metrics(freq_arr, mag_arr, ph_arr)
+        metric_lines = ["[bold green]── Bode Frequency Response Metrics ──[/bold green]"]
+
+        if "cutoff_fc_hz" in metrics:
+            metric_lines.append(f"  • -3dB Cutoff Bandwidth (fc): [bold yellow]{format_eng_unit(metrics['cutoff_fc_hz'], 'Hz')}[/bold yellow]")
+        if "resonance_freq_hz" in metrics:
+            metric_lines.append(f"  • Resonance Peak (Mp): [bold yellow]+{metrics['resonance_peak_db']:.2f} dB[/bold yellow] at [bold yellow]{format_eng_unit(metrics['resonance_freq_hz'], 'Hz')}[/bold yellow] (Q ≈ {metrics.get('q_factor', 1.0):.2f})")
+        if "gain_crossover_hz" in metrics:
+            metric_lines.append(f"  • Gain Crossover (0dB): {format_eng_unit(metrics['gain_crossover_hz'], 'Hz')} | Phase Margin (PM): [bold cyan]{metrics.get('phase_margin_deg', 0):.1f}°[/bold cyan]")
+        if "phase_crossover_hz" in metrics:
+            metric_lines.append(f"  • Phase Crossover (-180°): {format_eng_unit(metrics['phase_crossover_hz'], 'Hz')} | Gain Margin (GM): [bold cyan]{metrics.get('gain_margin_db', 0):.1f} dB[/bold cyan]")
+        if "rolloff_db_per_decade" in metrics:
+            metric_lines.append(f"  • High-Frequency Roll-off: {metrics['rolloff_db_per_decade']} dB/decade")
+
+        analysis_str = "\n".join(metric_lines)
+        return f"{mag_plot}\n\n{phase_plot}\n\n{analysis_str}"
+
+
+class SchematicVisualizer:
+    """Visualizes circuit netlists and dynamic system block diagrams in structured ASCII topologies."""
+
+    @classmethod
+    def render_circuit_topology(cls, components: Dict[str, Any], pin_map: Dict[str, List[str]]) -> str:
+        """Draws visual block diagram of connected circuit components."""
+        if not components:
+            return "[Empty Circuit Netlist]"
+
+        # Group components by connected nets
+        lines: List[str] = [
+            "[bold cyan]┌────────────────────────────────────────────────────────┐[/bold cyan]",
+            "[bold cyan]│            CIRCUIT SCHEMATIC TOPOLOGY BLOCK            │[/bold cyan]",
+            "[bold cyan]└────────────────────────────────────────────────────────┘[/bold cyan]"
+        ]
+
+        net_connections: Dict[str, List[str]] = {}
+        for cname, comp in components.items():
+            pins = pin_map.get(cname, getattr(comp, "nodes", []))
+            for i, p in enumerate(pins):
+                net = p if p != "0" else "GND"
+                if net not in net_connections:
+                    net_connections[net] = []
+                net_connections[net].append(f"{cname}.p{i+1}")
+
+        # Render component blocks
+        for cname, comp in components.items():
+            val = getattr(comp, "value", getattr(comp, "dc", ""))
+            val_str = format_eng_unit(val) if isinstance(val, (int, float)) and val != 0 else str(val)
+            pins = pin_map.get(cname, getattr(comp, "nodes", []))
+            pins_clean = [p if p != "0" else "GND" for p in pins]
+
+            comp_type = type(comp).__name__
+            line = f"  ┌──────────────┐\n  │ {cname:<4} ({comp_type[:6]}) │ ── Net [{pins_clean[0]}] ──► [{val_str}] ──► Net [{pins_clean[1] if len(pins_clean) > 1 else 'GND'}]\n  └──────────────┘"
+            lines.append(line)
+
+        # Net junction list
+        lines.append("\n  [bold green]Node Connections (Nets):[/bold green]")
+        for net, endpoints in net_connections.items():
+            end_str = " ──┼── ".join(endpoints)
+            lines.append(f"    • Net [{net:<8}]:  {end_str}")
+
+        return "\n".join(lines)
+
+    @classmethod
+    def render_dynamic_block_diagram(cls, blocks: Dict[str, Any], connections: List[Tuple[Tuple[str, int], Tuple[str, int]]]) -> str:
+        """Draws visual block diagram of connected dynamic system blocks."""
+        if not blocks:
+            return "[Empty Dynamic System Diagram]"
+
+        lines: List[str] = [
+            "[bold cyan]┌────────────────────────────────────────────────────────┐[/bold cyan]",
+            "[bold cyan]│            DYNAMIC SYSTEM BLOCK FLOW DIAGRAM           │[/bold cyan]",
+            "[bold cyan]└────────────────────────────────────────────────────────┘[/bold cyan]"
+        ]
+
+        # Draw blocks
+        for bname, block in blocks.items():
+            btype = type(block).__name__.replace("Block", "")
+            lines.append(f"  ┌──────────────────────┐")
+            lines.append(f"  │ {bname:<8} ({btype:<9}) │")
+            lines.append(f"  └──────────────────────┘")
+
+        # Draw connection flows
+        lines.append("\n  [bold green]Signal Flow Wires:[/bold green]")
+        for (src_b, src_p), (dst_b, dst_p) in connections:
+            lines.append(f"    [{src_b}.out{src_p}] ────────────────► [{dst_b}.in{dst_p}]")
+
+        return "\n".join(lines)
