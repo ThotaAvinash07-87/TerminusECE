@@ -1,83 +1,102 @@
-from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, RichLog
+#!/usr/bin/env python3
+"""TerminusECE - Command-Driven Terminal Workspace for Electrical and Computer Engineering."""
 
-class TerminusApp(App):
-    """A Textual TUI for the Terminus ECE Workbench."""
-    
-    # CSS styling for basic layout
-    CSS = """
-    #command_input {
-        dock: bottom;
-        margin: 1;
-    }
-    #console {
-        height: 100%;
-        margin: 1 2;
-        border: solid green;
-    }
-    """
+import argparse
+import sys
+import os
 
-    # Global keyboard shortcuts
-    BINDINGS = [
-        ("d", "toggle_dark", "Toggle dark mode"), 
-        ("q", "quit_app", "Quit Terminus")
-    ]
+from UI.app import TerminusApp, TerminusEngineBridge
+from CORE.ipc_router import IPCRouter
+from CORE.common_math import split_smart_statements
 
-    def compose(self) -> ComposeResult:
-        """Create child widgets for the app."""
-        yield Header(show_clock=True)
-        yield RichLog(id="console", highlight=True, markup=True)
-        yield Input(placeholder="Enter command (e.g., 'help', 'mode ltspice')...", id="command_input")
-        yield Footer()
 
-    def on_ready(self) -> None:
-        """Called when the DOM is ready."""
-        log = self.query_one(RichLog)
-        log.write("[bold green]=== Terminus Workbench Initialized ===[/bold green]")
-        log.write("System ready. Awaiting commands...")
-        self.query_one(Input).focus()
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
-    def action_quit_app(self) -> None:
-        """Exit the application."""
-        self.exit()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle when the user presses Enter in the input box."""
-        log = self.query_one(RichLog)
-        command = event.value.strip()
-        
-        if not command:
-            return
-        
-        log.write(f"[bold cyan]> {command}[/bold cyan]")
-        
-        self._route_command(command, log)
-        
-        event.input.value = ""
+def run_cli_commands(commands: str) -> None:
+    bridge = TerminusEngineBridge()
+    for line in split_smart_statements(commands, ";"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            res = bridge.execute_command(line)
+            if res:
+                # Strip textual rich markup tags for clean CLI stdout output
+                clean_text = res.replace("[bold green]", "").replace("[/bold green]", "") \
+                                .replace("[bold cyan]", "").replace("[/bold cyan]", "") \
+                                .replace("[bold magenta]", "").replace("[/bold magenta]", "") \
+                                .replace("[bold yellow]", "").replace("[/bold yellow]", "") \
+                                .replace("[bold red]", "").replace("[/bold red]", "") \
+                                .replace("[green]", "").replace("[/green]", "") \
+                                .replace("[red]", "").replace("[/red]", "") \
+                                .replace("[yellow]", "").replace("[/yellow]", "")
+                print(clean_text)
+        except Exception as e:
+            print(f"Error executing '{line}': {e}", file=sys.stderr)
 
-    def _route_command(self, command: str, log: RichLog) -> None:
-        """Validates and routes commands to the appropriate subsystem."""
-        cmd_lower = command.lower()
-        
-        valid_modes = ["matlab", "ltspice", "simulink", "xilinx", "embedded"]
-        
-        if cmd_lower == "help":
-            log.write(f"Available subsystems: [yellow]{', '.join(valid_modes)}[/yellow]")
-            log.write("Type 'mode <subsystem>' to switch contexts.")
-            
-        elif cmd_lower.startswith("mode "):
-            requested_mode = cmd_lower.replace("mode ", "").strip()
-            
-            if requested_mode in valid_modes:
-                log.write(f"Switching context to: [bold magenta]{requested_mode.upper()}[/bold magenta]")
-            else:
-                log.write(f"[red]Context Error:[/red] Subsystem '{requested_mode}' not found.")
-                log.write(f"Valid options are: {', '.join(valid_modes)}")
-                
-        else:
-            log.write(f"[red]Syntax Error:[/red] Unknown command '{command}'")
 
-# --- EXECUTION BLOCK ---
-if __name__ == "__main__":
+def run_script_file(file_path: str) -> None:
+    if not os.path.exists(file_path):
+        print(f"Error: Script file '{file_path}' not found.", file=sys.stderr)
+        sys.exit(1)
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    run_cli_commands(content.replace("\n", ";"))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="TerminusECE - Terminal-based unified workspace for ECE"
+    )
+    parser.add_argument(
+        "--cmd", "-c",
+        type=str,
+        help="Execute semicolon-separated commands in CLI batch mode and exit"
+    )
+    parser.add_argument(
+        "--file", "-f",
+        type=str,
+        help="Execute commands from a script file and exit"
+    )
+    parser.add_argument(
+        "--daemon", "-d",
+        action="store_true",
+        help="Start the background IPC synchronization server daemon"
+    )
+
+    args = parser.parse_args()
+
+    if args.daemon:
+        print("Starting TerminusECE IPC Daemon on 127.0.0.1:8765...")
+        router = IPCRouter()
+        router.start_background()
+        try:
+            import time
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            router.stop()
+            print("\nDaemon stopped.")
+        return
+
+    if args.cmd:
+        run_cli_commands(args.cmd)
+        return
+
+    if args.file:
+        run_script_file(args.file)
+        return
+
+    # Interactive TUI mode
     app = TerminusApp()
     app.run()
+
+
+if __name__ == "__main__":
+    main()
